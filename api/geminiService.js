@@ -1,12 +1,22 @@
 /**
  * PanicZero — Gemini AI Service
- * Handles both log triage and code snippet rectification via Gemini 2.5 Flash.
+ * Handles both log triage and code snippet rectification via Google Gemini API.
+ * Features automatic multi-model failover (gemini-2.5-flash -> gemini-2.0-flash -> gemini-1.5-flash).
  */
 
-const GEMINI_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent';
+const BASE_GEMINI_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
+
+// Priority order of Gemini models with seamless fallback
+const CANDIDATE_MODELS = [
+  'gemini-2.5-flash',
+  'gemini-2.0-flash',
+  'gemini-1.5-flash',
+  'gemini-1.5-flash-latest',
+  'gemini-1.5-pro',
+];
 
 /**
- * Triage a crash log using Gemini 2.5 Flash in strict JSON mode.
+ * Triage a crash log using Gemini in strict JSON mode.
  */
 export const triageLog = async (sanitizedLog, ecosystem) => {
   const apiKey = process.env.GEMINI_API_KEY;
@@ -32,7 +42,7 @@ ${sanitizedLog}
 \`\`\``;
 
   try {
-    return await callGemini(apiKey, prompt);
+    return await callGeminiWithFallbacks(apiKey, prompt);
   } catch (err) {
     console.warn('[PanicZero] Gemini Triage API failed, switching to resilient fallback:', err.message);
     return generateFallbackTriage(sanitizedLog, ecosystem, err.message);
@@ -40,7 +50,7 @@ ${sanitizedLog}
 };
 
 /**
- * Rectify a code snippet using Gemini 2.5 Flash.
+ * Rectify a code snippet using Gemini.
  * User pastes buggy/incomplete code, Gemini returns fixed version + explanation.
  */
 export const rectifyCode = async (codeSnippet, language, instructions) => {
@@ -70,7 +80,7 @@ ${codeSnippet}
 \`\`\``;
 
   try {
-    return await callGemini(apiKey, prompt);
+    return await callGeminiWithFallbacks(apiKey, prompt);
   } catch (err) {
     console.warn('[PanicZero] Gemini Rectify API failed, switching to resilient fallback:', err.message);
     return generateFallbackRectification(codeSnippet, language, instructions, err.message);
@@ -78,10 +88,31 @@ ${codeSnippet}
 };
 
 /**
- * Core Gemini API caller — shared by triage & rectification.
+ * Core Gemini API caller with automatic model fallback iteration.
  */
-const callGemini = async (apiKey, prompt) => {
-  const fullUrl = `${GEMINI_URL}?key=${apiKey.trim()}`;
+const callGeminiWithFallbacks = async (apiKey, prompt) => {
+  let lastError = null;
+
+  for (const model of CANDIDATE_MODELS) {
+    try {
+      console.log(`[PanicZero] Attempting AI generation with model: ${model}...`);
+      const result = await invokeGeminiModel(apiKey, model, prompt);
+      console.log(`[PanicZero] Successfully generated response using model: ${model}`);
+      return result;
+    } catch (err) {
+      console.warn(`[PanicZero] Model ${model} failed (${err.message}). Trying next fallback model...`);
+      lastError = err;
+    }
+  }
+
+  throw lastError || new Error('All Gemini candidate models failed');
+};
+
+/**
+ * Call a specific Gemini model endpoint.
+ */
+const invokeGeminiModel = async (apiKey, model, prompt) => {
+  const fullUrl = `${BASE_GEMINI_URL}/${model}:generateContent?key=${apiKey.trim()}`;
 
   const requestBody = {
     contents: [{ parts: [{ text: prompt }] }],
@@ -99,14 +130,14 @@ const callGemini = async (apiKey, prompt) => {
 
   if (!response.ok) {
     const errBody = await response.text();
-    throw new Error(`Gemini API ${response.status}: ${errBody}`);
+    throw new Error(`Status ${response.status}: ${errBody}`);
   }
 
   const data = await response.json();
 
   if (data?.candidates?.[0]?.content?.parts?.[0]?.text) {
     const raw = data.candidates[0].content.parts[0].text.trim();
-    // Clean code block wrappers if present
+    // Strip markdown wrappers (```json ... ``` or ``` ... ```)
     const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
     return JSON.parse(cleaned);
   }
@@ -114,7 +145,7 @@ const callGemini = async (apiKey, prompt) => {
   throw new Error('Empty or malformed Gemini API response');
 };
 
-// ── Fallback generators (when API key is missing or quota exceeded) ───────
+// ── Deterministic Fallback generators ───────────────────────────────────
 
 const generateFallbackTriage = (logText, ecosystem, apiError = null) => {
   const isCritical = /OutOfMemoryError|OOMKilled|FATAL|StackOverflow/i.test(logText);
