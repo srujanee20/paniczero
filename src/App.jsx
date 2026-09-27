@@ -40,14 +40,16 @@ export default function App() {
         body: JSON.stringify({ rawLog, ecosystem }),
       });
 
-      if (!res.ok) throw new Error(`Triage failed: ${res.status}`);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.error || `Triage failed with status ${res.status}`);
+      }
 
-      const incident = await res.json();
-      setIncidents((prev) => [incident, ...prev]);
-      setActiveIncident(incident);
+      setIncidents((prev) => [data, ...prev]);
+      setActiveIncident(data);
     } catch (err) {
       console.error('[PanicZero] Triage Error:', err);
-      setErrorMessage('Failed to process triage. Ensure the API server is running.');
+      setErrorMessage(err.message || 'Failed to process triage.');
     } finally {
       setIsProcessing(false);
     }
@@ -65,13 +67,15 @@ export default function App() {
         body: JSON.stringify({ code, language, instructions }),
       });
 
-      if (!res.ok) throw new Error(`Rectification failed: ${res.status}`);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.error || `Rectification failed with status ${res.status}`);
+      }
 
-      const result = await res.json();
-      setActiveRectification(result);
+      setActiveRectification(data);
     } catch (err) {
       console.error('[PanicZero] Rectify Error:', err);
-      setErrorMessage('Failed to process code rectification. Ensure the API server is running.');
+      setErrorMessage(err.message || 'Failed to process code rectification.');
     } finally {
       setIsProcessing(false);
     }
