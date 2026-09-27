@@ -120,6 +120,7 @@ router.get('/health', (_req, res) => {
 });
 
 app.use('/api', router);
+app.use('/', router);
 
 // Export for Vercel serverless
 export default app;
